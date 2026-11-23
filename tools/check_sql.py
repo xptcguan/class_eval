@@ -201,6 +201,45 @@ def main() -> int:
         return 1
     print("  ✅ 改写后与当前库列类型匹配（bool→true/false，int→0/1）")
 
+    # ---------- 3.6 写入参数类型检查（本次线上 DatatypeMismatch 的根因） ----------
+    # 场景：INSERT/UPDATE 往 boolean 列写参数，但调用方传了 int（psycopg 推成 smallint）
+    # → Postgres 报 column is of type boolean but expression is of type smallint
+    print()
+    print("== 写入参数类型检查（boolean 列不能收 int 参数） ==")
+    param_bad: list[str] = []
+    for sql, params in COLLECTED:
+        m = re.search(
+            r"(?:into|update)\s+(?:public\.)?(\w+)\s*(?:\(([^)]*)\)|set\s+(.*?)(?:where|$))",
+            sql, re.I | re.S)
+        if not m or not params:
+            continue
+        table = m.group(1).lower()
+        cols_raw = m.group(2) or ""
+        if cols_raw:
+            cols = [c.strip().strip('"').lower() for c in cols_raw.split(",")]
+        else:
+            # UPDATE ... SET a = ?, b = ?
+            cols = re.findall(r"(\w+)\s*=\s*\?", m.group(3) or "")
+            cols = [c.lower() for c in cols]
+        for idx, val in enumerate(params):
+            if idx >= len(cols):
+                break
+            col = cols[idx]
+            if col not in kinds:
+                continue
+            if kinds[col] == "bool" and isinstance(val, int) and not isinstance(val, bool):
+                param_bad.append(f"{table}.{col} 收到 int({val})：{sql.strip()[:80]}")
+    if param_bad:
+        print(f"  ❌ 发现 {len(param_bad)} 处会触发 DatatypeMismatch：")
+        seen_bad = set()
+        for x in param_bad:
+            if x in seen_bad:
+                continue
+            seen_bad.add(x)
+            print("    ·", x)
+        return 1
+    print("  ✅ 没有向 boolean 列传 int 参数")
+
     print()
     print("=" * 60)
     if bad:

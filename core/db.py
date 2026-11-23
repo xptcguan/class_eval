@@ -500,7 +500,7 @@ def create_class(name: str, head_teacher_id: str, grade: str = "", school_year: 
     ex("INSERT INTO teacher_classes (id, teacher_id, class_id, teacher_role)"
        " VALUES (?, ?, ?, 'head_teacher')", [new_id(), head_teacher_id, cid], cfg=cfg)
     ex("INSERT INTO class_settings (class_id, show_rank) VALUES (?, ?)",
-       [cid, int(cfg.show_rank_default)], cfg=cfg)
+       [cid, _bool_value(cfg.show_rank_default, "show_rank", cfg)], cfg=cfg)
     if with_defaults:
         ex_many("INSERT INTO eval_tags (id, class_id, name, score, category, icon, sort_order)"
                 " VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -602,8 +602,10 @@ def list_class_teachers(class_id: str, cfg: Config | None = None) -> list[dict[s
 def get_class_settings(class_id: str, cfg: Config | None = None) -> dict[str, Any]:
     row = one("SELECT * FROM class_settings WHERE class_id = ?", [class_id], cfg=cfg)
     if not row:
-        ex("INSERT INTO class_settings (class_id, show_rank) VALUES (?, 1)", [class_id], cfg=cfg)
-        row = {"class_id": class_id, "show_rank": 1}
+        default = _bool_value(True, "show_rank", cfg)
+        ex("INSERT INTO class_settings (class_id, show_rank) VALUES (?, ?)",
+           [class_id, default], cfg=cfg)
+        row = {"class_id": class_id, "show_rank": default}
     return row
 
 
