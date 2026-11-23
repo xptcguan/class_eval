@@ -53,8 +53,23 @@ DEFAULT_GROUPS = ["第一组", "第二组", "第三组", "第四组", "第五组
 # ===========================================================================
 # A. 连接与初始化
 # ===========================================================================
+def _bool_safe(sql: str) -> str:
+    """
+    把已知布尔列的 `= 1` / `= 0` 改写成 `= true` / `= false`。
+
+    为什么需要：SQLite 里布尔列是 INTEGER，`is_active = 1` 能跑；
+    PostgreSQL 的 boolean 不认整数，会报
+    `operator does not exist: boolean = integer`。
+    改写后 `true/false` 字面量两边都支持（SQLite 3.23+），一份 SQL 通用。
+    """
+    for col in _BOOL_COLUMNS:
+        sql = re.sub(rf"({col})\s*=\s*1(?![\d.])", r"\1 = true", sql)
+        sql = re.sub(rf"({col})\s*=\s*0(?![\d.])", r"\1 = false", sql)
+    return sql
+
+
 def _q(sql: str) -> str:
-    """把 `?` 占位符改写成 psycopg 的 `%(p0)s`"""
+    """把 `?` 占位符改写成 psycopg 的 `%(p0)s`，并做布尔常量兼容"""
     idx = 0
 
     def repl(_m):
@@ -63,10 +78,20 @@ def _q(sql: str) -> str:
         idx += 1
         return token
 
-    return re.sub(r"\?", repl, sql)
+    return re.sub(r"\?", repl, _bool_safe(sql))
+
+
+# 数据库里所有 boolean 列（schema_sqlite 里是 INTEGER 0/1，schema_supabase 里是 boolean）
+_BOOL_COLUMNS = (
+    "is_active",
+    "is_archived",
+    "show_rank",
+    "must_change_pwd",
+)
 
 
 def _params(params: Sequence[Any]) -> dict[str, Any]:
+    """参数转 psycopg 命名参数（布尔列请由调用方传 Python bool）"""
     return {f"p{i}": v for i, v in enumerate(params)}
 
 
@@ -96,6 +121,8 @@ class _PgExec:
         self.conn = conn
 
     def execute(self, sql: str, params: Sequence[Any] = ()):
+        # 把 SQL 里的 `?` 换成 psycopg 的命名占位符；注意 `?` 写成 `%(p0)s`
+        # 之后不能再被二次替换（见 tools/check_sql.py 的一致性测试）
         self.cur.execute(_q(sql), _params(list(params)))
         return self
 
@@ -131,11 +158,30 @@ def get_conn(cfg: Config | None = None):
             )
         import psycopg  # 延迟导入，本地模式无需安装
 
-        conn = psycopg.connect(dsn, autocommit=False, connect_timeout=15)
+        try:
+            conn = psycopg.connect(dsn, autocommit=False, connect_timeout=15)
+        except Exception as e:
+            raise RuntimeError(
+                "连接 Supabase 数据库失败。请检查：\n"
+                "1) DATABASE_URL 是否用的是 Connect → Session pooler 的连接串"
+                "（Direct connection 只有 IPv6，云端连不上）；\n"
+                "2) 数据库密码是否含 @ : / ? # 等字符未做 URL 编码；\n"
+                "3) 项目是否被暂停（免费版长期无访问会 pause）。\n"
+                f"原始错误：{type(e).__name__}: {e}"
+            ) from e
         try:
             cur = conn.cursor()
             yield _PgExec(cur, conn)
             conn.commit()
+        except psycopg.errors.UndefinedFunction as e:
+            conn.rollback()
+            # 布尔列写成 = 0/1 已由 _bool_safe 改写；走到这里通常是
+            # 表/函数真的不存在（没执行 schema_supabase.sql）或用了未知函数。
+            raise RuntimeError(
+                "数据库缺少表或函数。请到 Supabase → SQL Editor 全文执行 "
+                "sql/schema_supabase.sql（可重复执行）。\n"
+                f"原始错误：{e}"
+            ) from e
         except Exception:
             conn.rollback()
             raise
@@ -147,13 +193,34 @@ def get_conn(cfg: Config | None = None):
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON")
         try:
-            yield conn
+            yield _SafeConn(conn)
             conn.commit()
         except Exception:
             conn.rollback()
             raise
         finally:
             conn.close()
+
+
+class _SafeConn:
+    """
+    给 sqlite3.Connection 加一层包装：执行前把布尔列的 `= 1/0` 改写成 true/false。
+    这样同一份 SQL 在 SQLite 与 Postgres 上语义完全一致（SQLite 3.23+ 支持
+    true/false 字面量），本地跑通就等于云端能跑通。
+    其余属性和方法（row_factory、execute 之外的调用）原样透传。
+    """
+
+    def __init__(self, conn):
+        self._conn = conn
+
+    def execute(self, sql: str, params: Sequence[Any] = ()):
+        return self._conn.execute(_bool_safe(sql), params)
+
+    def executemany(self, sql: str, seq):
+        return self._conn.executemany(_bool_safe(sql), seq)
+
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
 
 
 def one(sql: str, params: Sequence[Any] = (), cfg: Config | None = None) -> dict[str, Any]:
@@ -406,7 +473,7 @@ def update_class(class_id: str, name: str, grade: str, school_year: str,
 
 def archive_class(class_id: str, archived: bool = True, cfg: Config | None = None) -> None:
     """归档班级：不物理删除，历史全部保留"""
-    ex("UPDATE classes SET is_archived = ? WHERE id = ?", [int(archived), class_id], cfg=cfg)
+    ex("UPDATE classes SET is_archived = ? WHERE id = ?", [bool(archived), class_id], cfg=cfg)
 
 
 def add_teacher_to_class(class_id: str, teacher_id: str, role: str = "subject_teacher",
@@ -459,7 +526,7 @@ def get_class_settings(class_id: str, cfg: Config | None = None) -> dict[str, An
 
 
 def set_show_rank(class_id: str, show: bool, cfg: Config | None = None) -> None:
-    ex("UPDATE class_settings SET show_rank = ? WHERE class_id = ?", [int(show), class_id], cfg=cfg)
+    ex("UPDATE class_settings SET show_rank = ? WHERE class_id = ?", [bool(show), class_id], cfg=cfg)
 
 
 def list_active_classes(cfg: Config | None = None) -> list[dict[str, Any]]:

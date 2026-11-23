@@ -22,6 +22,7 @@
 | **documents/03_云端部署.md** | 想让家长用手机链接访问 |
 | **documents/04_功能测试清单.md** | 交付/验收时逐项打勾 |
 | **documents/01_数据库设计.md** | 想改表结构 / 理解数据口径 |
+| **documents/05_云端报错排查.md** | 部署后报错，按异常类型查原因 |
 
 ## 设计取舍（为什么这么做）
 
@@ -98,6 +99,8 @@ streamlit run app.py
 | `tools/demo_data.py` | 一键生成演示数据（演示班 + 12 名学生 + 近两周 70 条打分）；`--clear` 清空 |
 | `tools/ui_check.py` | 真实浏览器（Edge）打开各页面，检查报错、关键文案、侧边栏、家长隔离 |
 | `tools/screenshot.py` | 批量截图关键页面，用于写汇报/教案 |
+| `tools/check_sql.py` | 把跑过的每条 SQL 过一遍 PostgreSQL 语法解析器，提前发现「本地能跑、云端报错」 |
+| `tools/seed_grade7_class2.py` | 建「七年级二班」并导入 60 名学生 |
 
 ## 自动化测试结果（本机实测）
 
