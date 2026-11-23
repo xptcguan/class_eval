@@ -160,7 +160,9 @@ def main() -> int:
 
     # ---------- 3.5 布尔列专项检查 ----------
     print()
-    print("== 布尔列写法检查（Postgres 不接受 boolean = 0/1） ==")
+    print("== 布尔列写法检查（按当前库的真实列类型判定） ==")
+    kinds = db._detect_bool_columns(cfg)
+    print(f"  当前库的列类型探测：{kinds}")
     bool_bad: list[str] = []
     for sql, _ in COLLECTED:
         # 检查"改写前"的原始 SQL 里是否残留布尔列与数字比较
@@ -168,8 +170,15 @@ def main() -> int:
             if re.search(rf"{col}\s*=\s*[01](?![\d.])", sql):
                 bool_bad.append(f"{col}: {sql.strip()[:90]}")
                 break
+    any_int = any(k == "int" for k in kinds.values())
+    any_bool = any(k == "bool" for k in kinds.values())
     if bool_bad:
-        print(f"  ⚠️ 发现 {len(bool_bad)} 条原始 SQL 用了 `= 0/1`（已由 db._bool_safe 自动改写为 true/false）")
+        if any_bool:
+            print(f"  ℹ️ {len(bool_bad)} 条原始 SQL 用了 `= 0/1`，当前库有 boolean 列，"
+                  f"已自动改写为 true/false")
+        elif any_int:
+            print(f"  ✅ {len(bool_bad)} 条 SQL 用了 `= 0/1`，当前库这些列就是 integer，"
+                  f"无需改写（保持原样）")
         for x in bool_bad[:5]:
             print("    ·", x)
     else:
@@ -178,16 +187,19 @@ def main() -> int:
     # 改写后不应再有残留
     residual = []
     for sql, _ in COLLECTED:
-        fixed = db._bool_safe(sql)
-        for col in db._BOOL_COLUMNS:
-            if re.search(rf"{col}\s*=\s*[01](?![\d.])", fixed):
-                residual.append(f"{col}: {fixed.strip()[:90]}")
+        fixed = db._bool_safe(sql, cfg)
+        for col, kind in kinds.items():
+            # 列是 boolean 时不应残留 = 0/1；列是 integer 时不应残留 = true/false
+            if kind == "bool" and re.search(rf"{col}\s*=\s*[01](?![\d.])", fixed):
+                residual.append(f"{col}(bool): {fixed.strip()[:90]}")
+            if kind == "int" and re.search(rf"{col}\s*=\s*(true|false)\b", fixed, re.I):
+                residual.append(f"{col}(int): {fixed.strip()[:90]}")
     if residual:
         print(f"  ❌ 改写后仍残留 {len(residual)} 条：")
         for x in residual[:5]:
             print("    ·", x)
         return 1
-    print("  ✅ 改写后全部为 true/false，Postgres 可执行")
+    print("  ✅ 改写后与当前库列类型匹配（bool→true/false，int→0/1）")
 
     print()
     print("=" * 60)

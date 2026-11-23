@@ -53,23 +53,112 @@ DEFAULT_GROUPS = ["第一组", "第二组", "第三组", "第四组", "第五组
 # ===========================================================================
 # A. 连接与初始化
 # ===========================================================================
-def _bool_safe(sql: str) -> str:
-    """
-    把已知布尔列的 `= 1` / `= 0` 改写成 `= true` / `= false`。
+# 数据库里所有"布尔语义"列。
+# 注意：同一列在不同库里物理类型可能不同 ——
+#   schema_sqlite.sql   用 INTEGER（0/1）
+#   schema_supabase.sql 用 boolean（true/false）
+# 而线上有人可能误用 sqlite 脚本建表，导致 PG 里也是 integer。
+# 所以这里不能硬编码 true/false，要按"库里的真实列类型"来决定写什么。
+_BOOL_COLUMNS = (
+    "is_active",
+    "is_archived",
+    "show_rank",
+    "must_change_pwd",
+)
 
-    为什么需要：SQLite 里布尔列是 INTEGER，`is_active = 1` 能跑；
-    PostgreSQL 的 boolean 不认整数，会报
-    `operator does not exist: boolean = integer`。
-    改写后 `true/false` 字面量两边都支持（SQLite 3.23+），一份 SQL 通用。
+# 运行时探测结果缓存：{"is_active": "bool" | "int"}
+_TYPE_CACHE: dict[str, str] = {}
+
+
+def _detect_bool_columns(cfg: Config | None = None) -> dict[str, str]:
     """
-    for col in _BOOL_COLUMNS:
-        sql = re.sub(rf"({col})\s*=\s*1(?![\d.])", r"\1 = true", sql)
-        sql = re.sub(rf"({col})\s*=\s*0(?![\d.])", r"\1 = false", sql)
+    探测这些列在**当前连接的数据库**里到底是 boolean 还是 integer。
+
+    返回 {"is_active": "bool", ...}；探测失败的列不出现在结果里（按 unknown 处理，
+    由 _bool_safe 退化成不改写，避免把原本正确的 SQL 改坏）。
+    """
+    global _TYPE_CACHE
+    cfg = cfg or get_settings()
+    if _TYPE_CACHE:
+        return _TYPE_CACHE
+
+    result: dict[str, str] = {}
+    # 表 → 该表里可能出现的布尔列
+    mapping = {
+        "teachers": ["is_active", "must_change_pwd"],
+        "classes": ["is_archived"],
+        "students": ["is_active"],
+        "eval_tags": ["is_active"],
+        "class_settings": ["show_rank"],
+    }
+    for table, cols in mapping.items():
+        try:
+            rows = all_rows(f"PRAGMA table_info({table})", cfg=cfg) if not cfg.is_cloud else \
+                all_rows(
+                    "SELECT column_name, data_type FROM information_schema.columns"
+                    " WHERE table_name = ?", [table], cfg=cfg)
+        except Exception:
+            continue
+        for r in rows:
+            col = (r.get("name") or r.get("column_name") or "").lower()
+            typ = (r.get("type") or r.get("data_type") or "").lower()
+            if col in cols:
+                if "bool" in typ:
+                    result[col] = "bool"
+                elif typ.startswith(("int", "smallint", "bigint", "numeric", "integer")):
+                    result[col] = "int"
+    _TYPE_CACHE = result
+    return result
+
+
+def _bool_value(value: Any, column: str, cfg: Config | None = None) -> Any:
+    """
+    写库前把布尔值转成目标列接受的物理类型。
+      · 列是 boolean → 返回 True/False
+      · 列是 integer → 返回 1/0
+    云端库若是照 schema_sqlite 建的（integer），这一步能避免
+    `column "is_archived" is of type integer but expression is of type boolean`。
+    """
+    kinds = _detect_bool_columns(cfg)
+    kind = kinds.get(column)
+    flag = bool(value)
+    if kind == "bool":
+        return flag
+    if kind == "int":
+        return 1 if flag else 0
+    return flag
+
+
+def reset_type_cache() -> None:
+    """切换数据库（如本地↔云端）后清掉探测缓存"""
+    global _TYPE_CACHE
+    _TYPE_CACHE = {}
+
+
+def _bool_safe(sql: str, cfg: Config | None = None) -> str:
+    """
+    按**数据库里的真实列类型**改写布尔常量：
+
+      · 列是 boolean  → `= 1/0` 改写为 `= true/false`
+      · 列是 integer  → `= true/false` 改写为 `= 1/0`
+
+    这样无论线上库是照 schema_supabase（boolean）建的，
+    还是误照 schema_sqlite（integer）建的，同一份 SQL 都能跑。
+    探测不到的列保持不变，宁可报错也不乱改。
+    """
+    kinds = _detect_bool_columns(cfg)
+    for col, kind in kinds.items():
+        if kind == "bool":
+            sql = re.sub(rf"({col})\s*=\s*1(?![\d.])", r"\1 = true", sql)
+            sql = re.sub(rf"({col})\s*=\s*0(?![\d.])", r"\1 = false", sql)
+        elif kind == "int":
+            sql = re.sub(rf"({col})\s*=\s*true\b", r"\1 = 1", sql, flags=re.I)
+            sql = re.sub(rf"({col})\s*=\s*false\b", r"\1 = 0", sql, flags=re.I)
     return sql
 
 
-def _q(sql: str) -> str:
-    """把 `?` 占位符改写成 psycopg 的 `%(p0)s`，并做布尔常量兼容"""
+def _q(sql: str, cfg: Config | None = None) -> str:
+    """把 `?` 占位符改写成 psycopg 的 `%(p0)s`，并按列类型做布尔常量兼容"""
     idx = 0
 
     def repl(_m):
@@ -78,16 +167,7 @@ def _q(sql: str) -> str:
         idx += 1
         return token
 
-    return re.sub(r"\?", repl, _bool_safe(sql))
-
-
-# 数据库里所有 boolean 列（schema_sqlite 里是 INTEGER 0/1，schema_supabase 里是 boolean）
-_BOOL_COLUMNS = (
-    "is_active",
-    "is_archived",
-    "show_rank",
-    "must_change_pwd",
-)
+    return re.sub(r"\?", repl, _bool_safe(sql, cfg))
 
 
 def _params(params: Sequence[Any]) -> dict[str, Any]:
@@ -116,14 +196,14 @@ def _normalize_row(row: Any) -> dict[str, Any]:
 class _PgExec:
     """把 psycopg Cursor 包装成 sqlite3.Connection 的常用子集"""
 
-    def __init__(self, cur, conn):
+    def __init__(self, cur, conn, cfg=None):
         self.cur = cur
         self.conn = conn
+        self.cfg = cfg
 
     def execute(self, sql: str, params: Sequence[Any] = ()):
-        # 把 SQL 里的 `?` 换成 psycopg 的命名占位符；注意 `?` 写成 `%(p0)s`
-        # 之后不能再被二次替换（见 tools/check_sql.py 的一致性测试）
-        self.cur.execute(_q(sql), _params(list(params)))
+        # 占位符改写 + 按列真实类型做布尔常量兼容
+        self.cur.execute(_q(sql, self.cfg), _params(list(params)))
         return self
 
     def executemany(self, sql: str, seq: Iterable[Sequence[Any]]):
@@ -171,7 +251,7 @@ def get_conn(cfg: Config | None = None):
             ) from e
         try:
             cur = conn.cursor()
-            yield _PgExec(cur, conn)
+            yield _PgExec(cur, conn, cfg)
             conn.commit()
         except psycopg.errors.UndefinedFunction as e:
             conn.rollback()
@@ -193,7 +273,7 @@ def get_conn(cfg: Config | None = None):
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON")
         try:
-            yield _SafeConn(conn)
+            yield _SafeConn(conn, cfg)
             conn.commit()
         except Exception:
             conn.rollback()
@@ -210,14 +290,15 @@ class _SafeConn:
     其余属性和方法（row_factory、execute 之外的调用）原样透传。
     """
 
-    def __init__(self, conn):
+    def __init__(self, conn, cfg=None):
         self._conn = conn
+        self.cfg = cfg
 
     def execute(self, sql: str, params: Sequence[Any] = ()):
-        return self._conn.execute(_bool_safe(sql), params)
+        return self._conn.execute(_bool_safe(sql, self.cfg), params)
 
     def executemany(self, sql: str, seq):
-        return self._conn.executemany(_bool_safe(sql), seq)
+        return self._conn.executemany(_bool_safe(sql, self.cfg), seq)
 
     def __getattr__(self, name):
         return getattr(self._conn, name)
@@ -473,7 +554,8 @@ def update_class(class_id: str, name: str, grade: str, school_year: str,
 
 def archive_class(class_id: str, archived: bool = True, cfg: Config | None = None) -> None:
     """归档班级：不物理删除，历史全部保留"""
-    ex("UPDATE classes SET is_archived = ? WHERE id = ?", [bool(archived), class_id], cfg=cfg)
+    ex("UPDATE classes SET is_archived = ? WHERE id = ?",
+       [_bool_value(archived, "is_archived", cfg), class_id], cfg=cfg)
 
 
 def add_teacher_to_class(class_id: str, teacher_id: str, role: str = "subject_teacher",
@@ -526,7 +608,8 @@ def get_class_settings(class_id: str, cfg: Config | None = None) -> dict[str, An
 
 
 def set_show_rank(class_id: str, show: bool, cfg: Config | None = None) -> None:
-    ex("UPDATE class_settings SET show_rank = ? WHERE class_id = ?", [bool(show), class_id], cfg=cfg)
+    ex("UPDATE class_settings SET show_rank = ? WHERE class_id = ?",
+       [_bool_value(show, "show_rank", cfg), class_id], cfg=cfg)
 
 
 def list_active_classes(cfg: Config | None = None) -> list[dict[str, Any]]:
