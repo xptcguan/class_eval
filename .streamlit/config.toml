@@ -1,0 +1,20 @@
+# Streamlit 项目配置
+[theme]
+base = "light"
+primaryColor = "#FF7A8A"
+backgroundColor = "#FFFDFA"
+secondaryBackgroundColor = "#FFF6EC"
+textColor = "#3A3A46"
+font = "sans serif"
+
+[server]
+maxUploadSize = 10
+enableXsrfProtection = true
+enableCORS = true
+
+[browser]
+gatherUsageStats = false
+
+[client]
+showErrorDetails = true
+toolbarMode = "minimal"
