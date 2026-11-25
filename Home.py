@@ -154,13 +154,10 @@ with left:
 with right:
     st.markdown(
         """
-        <div class="ce-card" style="padding:20px 22px">
-          <div class="ce-title">身份速查</div>
-          <div class="role-row"><b>班主任</b><span>建班、管学生与标签、打分、撤回、导出</span></div>
-          <div class="role-row"><b>科任老师</b><span>打分、看榜单、看日志</span></div>
-          <div class="role-row"><b>家长</b><span>凭学号 + 查看码，只看自家孩子</span></div>
-          <div class="ce-sub" style="margin-top:12px">
-            首次使用请先登录班主任账号，在「班级管理」新建班级并录入学生名单。
+        <div class="ce-card" style="padding:22px 24px">
+          <div class="login-h1" style="font-size:22px;margin:0">星光评阅屋</div>
+          <div class="ce-sub" style="margin-top:10px;line-height:1.9">
+            班主任课堂评价 · 学生积分 · 小组评比系统
           </div>
         </div>
         """,

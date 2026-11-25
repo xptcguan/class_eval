@@ -225,6 +225,40 @@ class _PgExec:
         self.cur.execute(script)
 
 
+# 进程内连接池（云端模式）。用模块级全局而非 st.cache_resource，
+# 因为 tools/ 与 tests/ 下的脚本也会 import 本模块，它们没有 Streamlit runtime。
+_PG_POOL = None
+_PG_POOL_DSN: str | None = None
+
+
+def _get_pg_pool(dsn: str):
+    """复用一个连接池；本地脚本同样可用。未装 psycopg_pool 时退化为直连。"""
+    global _PG_POOL, _PG_POOL_DSN
+    if _PG_POOL is None or _PG_POOL_DSN != dsn:
+        try:
+            from psycopg_pool import ConnectionPool
+        except ImportError:  # 兜底：没有 pool 包就直接返回 None，走直连
+            return None
+        if _PG_POOL is not None:
+            try:
+                _PG_POOL.close()
+            except Exception:
+                pass
+        _PG_POOL = ConnectionPool(dsn, min_size=1, max_size=4, timeout=10, open=True)
+        _PG_POOL_DSN = dsn
+    return _PG_POOL
+
+
+def _invalidate_cache() -> None:
+    """写操作后清查询缓存；无 Streamlit runtime（脚本/测试）时静默跳过"""
+    try:
+        import streamlit as st
+
+        st.cache_data.clear()
+    except Exception:
+        pass
+
+
 @contextmanager
 def get_conn(cfg: Config | None = None):
     """获取执行器；正常退出提交事务，异常回滚"""
@@ -239,22 +273,28 @@ def get_conn(cfg: Config | None = None):
         import psycopg  # 延迟导入，本地模式无需安装
 
         try:
-            conn = psycopg.connect(dsn, autocommit=False, connect_timeout=15)
-        except Exception as e:
-            raise RuntimeError(
-                "连接 Supabase 数据库失败。请检查：\n"
-                "1) DATABASE_URL 是否用的是 Connect → Session pooler 的连接串"
-                "（Direct connection 只有 IPv6，云端连不上）；\n"
-                "2) 数据库密码是否含 @ : / ? # 等字符未做 URL 编码；\n"
-                "3) 项目是否被暂停（免费版长期无访问会 pause）。\n"
-                f"原始错误：{type(e).__name__}: {e}"
-            ) from e
-        try:
-            cur = conn.cursor()
-            yield _PgExec(cur, conn, cfg)
-            conn.commit()
+            pool = _get_pg_pool(dsn)
+            if pool is None:
+                # 未安装 psycopg_pool：退化为单次直连（功能不变，只是慢一点）
+                conn = psycopg.connect(dsn, autocommit=False, connect_timeout=15)
+                try:
+                    cur = conn.cursor()
+                    yield _PgExec(cur, conn, cfg)
+                    conn.commit()
+                except Exception:
+                    conn.rollback()
+                    raise
+                finally:
+                    conn.close()
+                return
+            # pool.connection() 退出时自动 commit / 异常 rollback，并把连接**还回池**
+            # （不 close），省掉每次查询的 TCP+TLS 握手，这是线上提速的关键。
+            with pool.connection() as conn:
+                with conn.cursor() as cur:
+                    yield _PgExec(cur, conn, cfg)
+        except RuntimeError:
+            raise
         except psycopg.errors.UndefinedFunction as e:
-            conn.rollback()
             # 布尔列写成 = 0/1 已由 _bool_safe 改写；走到这里通常是
             # 表/函数真的不存在（没执行 schema_supabase.sql）或用了未知函数。
             raise RuntimeError(
@@ -262,11 +302,14 @@ def get_conn(cfg: Config | None = None):
                 "sql/schema_supabase.sql（可重复执行）。\n"
                 f"原始错误：{e}"
             ) from e
-        except Exception:
-            conn.rollback()
-            raise
-        finally:
-            conn.close()
+        except Exception as e:
+            raise RuntimeError(
+                "连接 Supabase 数据库失败。请检查：\n"
+                "1) DATABASE_URL 是否用的是 Connect → Session pooler 的连接串；\n"
+                "2) 数据库密码是否含 @ : / ? # 等字符未做 URL 编码；\n"
+                "3) 项目是否被暂停（免费版长期无访问会 pause）。\n"
+                f"原始错误：{type(e).__name__}: {e}"
+            ) from e
     else:
         cfg.db_path.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(str(cfg.db_path), check_same_thread=False, timeout=15)
@@ -317,15 +360,17 @@ def all_rows(sql: str, params: Sequence[Any] = (), cfg: Config | None = None) ->
 
 
 def ex(sql: str, params: Sequence[Any] = (), cfg: Config | None = None) -> None:
-    """执行写操作"""
+    """执行写操作（写后清查询缓存）"""
     with get_conn(cfg) as cur:
         cur.execute(sql, list(params))
+    _invalidate_cache()
 
 
 def ex_many(sql: str, seq: Iterable[Sequence[Any]], cfg: Config | None = None) -> None:
     """批量写（同一事务）"""
     with get_conn(cfg) as cur:
         cur.executemany(sql, [list(p) for p in seq])
+    _invalidate_cache()
 
 
 def init_db(cfg: Config | None = None) -> str:
@@ -864,6 +909,7 @@ def add_scores(class_id: str, student_ids: list[str], tag_id: str, remark: str,
             )
             cur.execute("UPDATE students SET total_score = total_score + ? WHERE id = ?", [score, sid])
 
+    _invalidate_cache()
     word = "加分" if score > 0 else "扣分"
     return True, f"{word}成功：{tag['name']} {score:+d} 分 × {len(student_ids)} 人", batch_id
 
@@ -898,7 +944,40 @@ def revoke_log(log_id: str, teacher: dict[str, Any], reason: str = "",
     write_audit(log["class_id"], teacher, "revoke_score",
                 f"撤回 {(st or {}).get('name', '')} 的「{log['tag_name']}」"
                 f"{int(log['score']):+d} 分；原因：{reason or '未填写'}", cfg=cfg)
+    _invalidate_cache()
     return True, "已撤回，操作已记入审计日志"
+
+
+def clear_class_scores(class_id: str, teacher: dict[str, Any],
+                       cfg: Config | None = None) -> tuple[bool, str]:
+    """
+    一键清除本班全部积分（软清空，可追溯）：
+      · 把所有有效 score_logs 标记为 revoked，记撤回人/时间/原因
+      · 学生 total_score 归零
+      · 写审计日志
+    不是物理删除，记录仍可在"仅已撤回"里查到，必要时可恢复。
+    """
+    cfg = cfg or get_settings()
+    if not is_head_teacher(teacher["id"], class_id, cfg):
+        return False, "只有班主任可以清除积分"
+    now = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    n = one("SELECT COUNT(*) AS n FROM score_logs WHERE class_id = ? AND status = 'normal'",
+            [class_id], cfg=cfg)
+    total = int((n or {}).get("n") or 0)
+    if total == 0:
+        return False, "本班当前没有有效积分记录"
+    with get_conn(cfg) as cur:
+        cur.execute(
+            "UPDATE score_logs SET status = 'revoked', revoked_by = ?, revoked_by_name = ?,"
+            " revoked_at = ?, revoke_reason = ? WHERE class_id = ? AND status = 'normal'",
+            [teacher["id"], teacher.get("display_name", ""), now,
+             "一键清除班级积分", class_id],
+        )
+        cur.execute("UPDATE students SET total_score = 0 WHERE class_id = ?", [class_id])
+    write_audit(class_id, teacher, "clear_scores",
+                f"一键清除本班积分，共 {total} 条记录（已标记撤回，可在日志中查阅）", cfg=cfg)
+    _invalidate_cache()
+    return True, f"已清除 {total} 条评分记录，学生积分归零"
 
 
 def revoke_batch(batch_id: str, teacher: dict[str, Any], reason: str = "",
@@ -926,6 +1005,7 @@ def revoke_batch(batch_id: str, teacher: dict[str, Any], reason: str = "",
     write_audit(logs[0]["class_id"], teacher, "revoke_batch",
                 f"整批撤回 {len(logs)} 条「{logs[0]['tag_name']}」记录；原因：{reason or '未填写'}",
                 cfg=cfg)
+    _invalidate_cache()
     return True, f"已整批撤回 {len(logs)} 条记录"
 
 

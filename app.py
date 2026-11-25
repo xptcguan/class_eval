@@ -25,7 +25,7 @@ from __future__ import annotations
 import streamlit as st
 
 st.set_page_config(
-    page_title="班级评价小屋",
+    page_title="星光评阅屋",
     page_icon="🏫",
     layout="wide",
     initial_sidebar_state="expanded",

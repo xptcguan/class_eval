@@ -21,9 +21,9 @@ from typing import Any
 
 import streamlit as st
 
-from core import auth, db, ui
+from core import auth, cache as cdata, db, ui
 
-APP_TITLE = "班级评价小屋"
+APP_TITLE = "星光评阅屋"
 APP_SUBTITLE = "班主任课堂评价 · 学生积分 · 小组评比系统"
 
 # 页面文件（与 pages/ 下真实文件名一致）
@@ -77,7 +77,7 @@ def _sidebar_brand() -> None:
 
 def _class_switcher(teacher: dict) -> None:
     """教师端班级切换（一个老师可管理多个班级）"""
-    classes = db.list_classes_for_teacher(teacher["id"])
+    classes = cdata.list_classes_for_teacher(teacher["id"])
     if not classes:
         st.sidebar.markdown(
             '<div class="sb-hint">还没有班级，请到「班级管理」新建</div>',
@@ -156,17 +156,17 @@ def teacher_shell(required: bool = True) -> tuple[dict[str, Any], dict[str, Any]
     )
 
     cid = auth.current_class_id()
-    cls = db.get_class(cid) if cid else None
+    cls = cdata.get_class(cid) if cid else None
     # 当前班级失效（被删/无权限）时自动回落到他有权限的第一个班级
-    if cid and not db.get_membership(teacher["id"], cid):
-        others = db.list_classes_for_teacher(teacher["id"])
+    if cid and not cdata.get_membership(teacher["id"], cid):
+        others = cdata.list_classes_for_teacher(teacher["id"])
         if others:
             cid = others[0]["id"]
             auth.set_current_class(cid)
-            cls = db.get_class(cid)
+            cls = cdata.get_class(cid)
         else:
             cls = None
-    membership = db.get_membership(teacher["id"], cid) if cid else None
+    membership = cdata.get_membership(teacher["id"], cid) if cid else None
     role_in_class = membership["teacher_role"] if membership else ""
     subject = (membership or {}).get("subject") or ""
 
@@ -214,8 +214,8 @@ def quick_score_widget(class_id: str = "", role_in_class: str = "",
 
     with st.popover("快速评分", icon=":material/bolt:"):
         st.markdown('<div class="qs-title">快速评分</div>', unsafe_allow_html=True)
-        tags = db.list_tags(class_id)
-        students = db.list_students(class_id)
+        tags = cdata.list_tags(class_id)
+        students = cdata.list_students(class_id)
         if not tags or not students:
             st.caption("请先在「学生与标签」配置标签、在「班级管理」录入学生")
             return

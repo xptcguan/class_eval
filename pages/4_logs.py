@@ -18,7 +18,7 @@ import datetime as dt
 import pandas as pd
 import streamlit as st
 
-from core import auth, db, exporter, ui
+from core import auth, cache as cdata, db, exporter, ui
 from ui.nav import page_header, quick_score_widget, set_current_nav, teacher_shell
 
 st.set_page_config(page_title="评价记录", page_icon="📋", layout="wide",
@@ -31,10 +31,10 @@ is_head = role == "head_teacher"
 
 page_header("评价记录", "", cls.get("name", ""))
 
-students = db.list_students(cid, include_inactive=True)
-groups = db.list_groups_of_class(cid)
-tags = db.list_tags(cid, include_inactive=True)
-teachers_of_class = db.list_class_teachers(cid)
+students = cdata.list_students(cid, include_inactive=True)
+groups = cdata.list_groups_of_class(cid)
+tags = cdata.list_tags(cid, include_inactive=True)
+teachers_of_class = cdata.list_class_teachers(cid)
 
 # ---------------------------------------------------------------------------
 # 筛选
@@ -304,7 +304,7 @@ with tab_export:
             )
 
 with tab_audit:
-    audits = db.list_audit_logs(cid, limit=100)
+    audits = cdata.list_audit_logs(cid, limit=100)
     if not audits:
         st.caption("暂无审计记录")
     else:

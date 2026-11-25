@@ -246,6 +246,41 @@ body.bigscreen .grp-card{ padding:26px 18px; }
 .grp-meta{ font-size:12.5px; color:var(--sub); margin-top:4px; }
 
 /* 平板 / 小屏 */
+
+/* 本周之星：呼吸光晕 + 扫光 */
+.dash-shine{ position:relative; overflow:hidden; border-color:#F0C14B;
+  box-shadow:0 0 0 3px rgba(232,163,23,.14), 0 4px 16px rgba(232,163,23,.20);
+  animation:dashGlow 2.4s ease-in-out infinite; }
+@keyframes dashGlow{
+  0%,100%{ box-shadow:0 0 0 3px rgba(232,163,23,.12), 0 4px 14px rgba(232,163,23,.16); }
+  50%{ box-shadow:0 0 0 6px rgba(232,163,23,.20), 0 6px 22px rgba(232,163,23,.32); }
+}
+.dash-shine::after{
+  content:""; position:absolute; inset:0; pointer-events:none;
+  background:linear-gradient(110deg,transparent 30%,rgba(255,255,255,.75) 46%,transparent 62%);
+  background-size:220% 100%; animation:dashSweep 2.6s ease-in-out infinite;
+}
+@keyframes dashSweep{ 0%{ background-position:-140% 0; } 100%{ background-position:240% 0; } }
+/* 小组积分放大 */
+.dash-value-big{ font-size:22px !important; line-height:1.5; font-weight:800; }
+
+
+/* ===== 投屏：前三名专属大卡 ===== */
+.tv-sec{ font-size:15px; font-weight:700; color:var(--sub); letter-spacing:1px;
+  margin:6px 0 10px; }
+body.bigscreen .tv-sec{ font-size:18px; }
+.tv-top{ padding:26px 18px 20px; }
+.tv-top .s-name, .tv-name{ font-size:24px !important; margin-top:12px; }
+.tv-top .s-score, .tv-score{ font-size:46px !important; font-weight:900;
+  letter-spacing:-1px; margin-top:4px; }
+.tv-meta{ font-size:13.5px; color:var(--sub); margin-top:6px; }
+body.bigscreen .tv-top .s-name{ font-size:28px !important; }
+body.bigscreen .tv-top .s-score{ font-size:54px !important; }
+.tv-medal{ position:absolute; top:-20px; left:50%; transform:translateX(-50%);
+  font-size:38px; line-height:1; filter:drop-shadow(0 3px 5px rgba(0,0,0,.2)); }
+.tv-top1{ border-width:3px; }
+.tv-top1::after{ animation-duration:2.2s; }
+
 @media (max-width:1024px){
   .block-container{ padding-left:1rem; padding-right:1rem; }
   .page-title{ font-size:21px; }
@@ -487,16 +522,25 @@ def group_card_html(name: str, score: float | int, member_count: int = 0,
 
 
 def dashboard(cards: list[dict]) -> str:
-    """仪表盘卡片组；card: {label, value, hint?, tone?(plus/minus/primary), icon?}"""
+    """
+    仪表盘卡片组。
+    card 支持：{label, value, hint?, tone?(plus/minus/primary), icon?,
+               shine?(本周之星闪光特效), big?(小组积分放大)}
+    """
     tone_color = {"plus": "var(--plus)", "minus": "var(--minus)", "primary": "var(--primary)"}
     cells = []
     for c in cards:
         color = tone_color.get(c.get("tone", ""), "var(--ink)")
         hint = f'<div class="dash-hint">{esc(c["hint"])}</div>' if c.get("hint") else ""
         icon = f'{c["icon"]} ' if c.get("icon") else ""
+        extra = ""
+        if c.get("shine"):
+            extra += " dash-shine"
         cells.append(
-            f'<div class="dash-card"><div class="dash-label">{icon}{esc(c["label"])}</div>'
-            f'<div class="dash-value" style="color:{color}">{esc(c["value"])}</div>{hint}</div>'
+            f'<div class="dash-card{extra}">'
+            f'<div class="dash-label">{icon}{esc(c["label"])}</div>'
+            f'<div class="dash-value{" dash-value-big" if c.get("big") else ""}" '
+            f'style="color:{color}">{esc(c["value"])}</div>{hint}</div>'
         )
     return f'<div class="dash-grid">{"".join(cells)}</div>'
 

@@ -90,7 +90,7 @@ def main() -> int:
         pg.goto(args.url, wait_until="networkidle")
         time.sleep(4)
         t = body(pg)
-        check("出现系统名", "班级评价小屋" in t)
+        check("出现系统名", "星光评阅屋" in t)
         check("三种入口齐全", all(k in t for k in ("老师登录", "家长查看", "教室投屏")))
         check("首页不再有『它能做什么』", "它能做什么" not in t)
         check("首页不再有『数据安全』", "数据安全" not in t)

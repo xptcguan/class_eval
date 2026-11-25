@@ -24,7 +24,7 @@ import datetime as dt
 import pandas as pd
 import streamlit as st
 
-from core import auth, db, ui
+from core import auth, cache as cdata, db, ui
 from ui.nav import go, page_header, quick_score_widget, set_current_nav, teacher_shell
 
 st.set_page_config(page_title="积分榜单", page_icon="🏆", layout="wide",
@@ -34,6 +34,27 @@ set_current_nav("ranking")
 teacher, cls, role = teacher_shell(required=True)
 cid = st.session_state[auth.K_CLASS]
 is_head = role == "head_teacher"
+
+@st.dialog("确认清除全部积分？")
+def _confirm_clear_dialog(cls: dict, class_id: str, teacher: dict) -> None:
+    """二次确认弹窗：清除本班全部积分（软清空，可查回）"""
+    st.warning(
+        f"将把「{cls.get('name', '')}」本学期全部有效评分标记为已撤回，所有学生积分归零。\n\n"
+        "记录不会被物理删除，可在「评价记录 → 仅已撤回」中查阅。"
+    )
+    c1, c2 = st.columns(2)
+    if c1.button("确认清除", type="primary", use_container_width=True):
+        ok, msg = db.clear_class_scores(class_id, teacher)
+        st.session_state["confirm_clear"] = False
+        if ok:
+            ui.flash(msg, "success")
+            st.rerun()
+        else:
+            st.error(msg)
+    if c2.button("取消", use_container_width=True):
+        st.session_state["confirm_clear"] = False
+        st.rerun()
+
 
 page_header("积分榜单", "", cls.get("name", ""))
 
@@ -45,7 +66,7 @@ PERIOD_DESC = {
     "all": "统计全部有效记录的净积分",
 }
 
-settings = db.get_class_settings(cid)
+settings = cdata.get_class_settings(cid)
 show_rank = bool(settings.get("show_rank", 1))
 
 # ---------------------------------------------------------------------------
@@ -69,13 +90,13 @@ with c3:
     if st.button("投屏展示", icon=":material/tv:", use_container_width=True):
         go("tv_board")
 
-rows = db.get_ranking(cid, period)
+rows = cdata.get_ranking(cid, period)
 if not rows:
     ui.empty_state("本班还没有学生", "先到「班级管理 → 学生名单」录入名单", "👥")
     st.stop()
 
 rows = db.apply_competition_rank(rows, "period_score")
-group_rows = db.get_group_ranking(cid, period)
+group_rows = cdata.get_group_ranking(cid, period)
 grp_rank_map: dict[str, tuple[int, int]] = {}
 for g in group_rows:
     for m in g["members"]:
@@ -188,7 +209,7 @@ this_week_start = (now - dt.timedelta(days=now.weekday())).replace(
     hour=0, minute=0, second=0, microsecond=0)
 last_week_start = this_week_start - dt.timedelta(days=7)
 
-this_week = {r["id"]: int(r["period_score"]) for r in db.get_ranking(cid, "week")}
+this_week = {r["id"]: int(r["period_score"]) for r in cdata.get_ranking(cid, "week")}
 last_week: dict[str, int] = {}
 for lg in db.query_logs(cid, start=last_week_start, end=this_week_start, limit=100000):
     if lg.get("student_id"):
@@ -221,5 +242,18 @@ if deltas:
 else:
     st.caption("本周暂无进步数据（需要上周也有记录才能比较）")
 
+# ---------------------------------------------------------------------------
+# 一键清除积分（仅班主任，需对话框二次确认）
+# ---------------------------------------------------------------------------
+if is_head:
+    st.markdown('<div style="height:10px"></div>', unsafe_allow_html=True)
+    if st.button("清除本班所有学生积分", icon=":material/restart_alt:",
+                 type="secondary", key="open_clear_dialog"):
+        st.session_state["confirm_clear"] = True
+
+    if st.session_state.get("confirm_clear"):
+        _confirm_clear_dialog(cls, cid, teacher)
+
 quick_score_widget(cid, role)
 ui.show_flash()
+

@@ -16,7 +16,7 @@ import io
 import pandas as pd
 import streamlit as st
 
-from core import auth, avatars, db, ui
+from core import auth, avatars, cache as cdata, db, ui
 from ui.nav import go, page_header, set_current_nav, teacher_shell
 
 st.set_page_config(page_title="班级管理", page_icon="🏫", layout="wide",
@@ -38,7 +38,7 @@ tab_class, tab_students, tab_groups, tab_teachers, tab_codes = st.tabs(
 # 1. 我的班级
 # ===========================================================================
 with tab_class:
-    classes = db.list_classes_for_teacher(teacher["id"])
+    classes = cdata.list_classes_for_teacher(teacher["id"])
 
     if is_head:
         with st.expander("新建班级", expanded=not classes, icon=":material/add:"):
@@ -141,7 +141,7 @@ with tab_students:
     if not cid:
         st.info("请先选择或新建一个班级")
     else:
-        students = db.list_students(cid, include_inactive=True)
+        students = cdata.list_students(cid, include_inactive=True)
         active = [s for s in students if s["is_active"]]
         st.markdown(
             ui.dashboard([
@@ -298,7 +298,7 @@ with tab_groups:
     if not cid:
         st.info("请先选择班级")
     else:
-        groups = db.list_groups_of_class(cid)
+        groups = cdata.list_groups_of_class(cid)
         students = db.list_students(cid)
         c1, c2 = st.columns([1.2, 1])
         with c1:
@@ -360,7 +360,7 @@ with tab_teachers:
         st.caption("只有班主任可以管理科任老师")
     else:
         st.markdown('<div class="ce-title">本班任课老师</div>', unsafe_allow_html=True)
-        rows = db.list_class_teachers(cid)
+        rows = cdata.list_class_teachers(cid)
         for r in rows:
             c1, c2, c3 = st.columns([3, 2.2, 1])
             with c1:

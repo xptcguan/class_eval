@@ -19,7 +19,7 @@ import pandas as pd
 import streamlit as st
 
 from config import MAX_UPLOAD_MB, get_settings
-from core import auth, avatars, db, ui
+from core import auth, avatars, cache as cdata, db, ui
 from core.storage import delete_image, upload_image
 from ui.nav import page_header, set_current_nav, teacher_shell
 
@@ -43,7 +43,7 @@ tab_tags, tab_students = st.tabs(["评价标签", "学生档案"])
 # 标签
 # ===========================================================================
 with tab_tags:
-    tags_all = db.list_tags(cid, include_inactive=True)
+    tags_all = cdata.list_tags(cid, include_inactive=True)
     active_count = len([t for t in tags_all if t["is_active"]])
     st.caption(f"启用中 {active_count} 个 · 分值正数=加分项，负数=扣分项 · "
                "停用不影响历史记录 · 图标可上传图片")
@@ -190,8 +190,8 @@ with tab_tags:
 # 学生档案
 # ===========================================================================
 with tab_students:
-    students = db.list_students(cid)
-    groups = db.list_groups_of_class(cid)
+    students = cdata.list_students(cid)
+    groups = cdata.list_groups_of_class(cid)
     if not students:
         ui.empty_state("还没有学生", "到「班级管理 → 学生名单」录入", "👥")
         st.stop()

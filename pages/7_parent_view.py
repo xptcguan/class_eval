@@ -21,6 +21,7 @@ import datetime as dt
 import pandas as pd
 import streamlit as st
 
+from core import cache as cdata  # noqa: F401
 from core import auth, db, ui
 
 st.set_page_config(page_title="家长查看", page_icon="👨‍👩‍👦", layout="wide",

@@ -130,3 +130,12 @@ python tools/ui_check.py           → 通过 41 项，失败 0   （真实 Edge
 - Python 3.9+（推荐 3.11）
 - 内存 512MB 足够（低并发，几十人）
 - 云端：Supabase 免费版 + Streamlit Community Cloud 免费版
+
+## v1.2 更新要点
+
+| 类别 | 内容 |
+|---|---|
+| 性能 | **数据库连接池**（复用连接，省掉每次 TCP+TLS 握手）；**只读查询缓存**（`core/cache.py`，TTL 60~90s，写后自动清）；开启 `fastReruns` |
+| 修 Bug | Storage 403 `Invalid Compact JWS`：客户端延迟单例 + 启动校验 key 格式；建班 `show_rank` 类型不匹配 |
+| 界面 | 改名「星光评阅屋」；首页去掉身份速查；仪表盘只留 在班学生/本周之星(闪光)/小组积分 Top3(放大)；去掉图片凭证；投屏退出按钮移到底部、前三名大卡展示；榜单新增「清除全部积分」（弹窗确认，软清空可查回） |
+| 文档 | `documents/08_国内低成本部署.md`：阿里云轻量 + Supabase 完整步骤（约 ¥100/年） |

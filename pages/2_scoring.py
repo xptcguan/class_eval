@@ -4,7 +4,7 @@ pages/2_scoring.py —— 快速评分（核心操作页）
 页面结构
   1. 仪表盘：今日评价数 / 在班学生 / 本周之星 / 小组积分 Top3
   2. 选标签（加分项绿、扣分项橙红），选中高亮
-  3. 评语模板（点一下填入，仍可编辑）+ 图片凭证
+  3. 评语模板（点一下填入，仍可编辑）
   4. 单人打分 / 小组批量打分
   5. 最近评价：同一学生多条记录折叠成一条，点开看该生全部明细与评语
 
@@ -17,9 +17,7 @@ import datetime as dt
 
 import streamlit as st
 
-from config import MAX_UPLOAD_MB, get_settings
-from core import auth, db, ui
-from core.storage import upload_image
+from core import auth, cache as cdata, db, ui
 from ui.nav import (_remark_templates, page_header, quick_score_widget,
                     set_current_nav, teacher_shell)
 
@@ -32,10 +30,10 @@ cid = st.session_state[auth.K_CLASS]
 
 page_header("快速评分", "", cls.get("name", ""))
 
-overview = db.class_overview(cid)
-tags = db.list_tags(cid)
-students = db.list_students(cid)
-groups = db.list_groups_of_class(cid)
+overview = cdata.class_overview(cid)
+tags = cdata.list_tags(cid)
+students = cdata.list_students(cid)
+groups = cdata.list_groups_of_class(cid)
 
 if not students:
     ui.empty_state("本班还没有学生", "先到「班级管理 → 学生名单」录入名单，再回来打分", "👥")
@@ -49,9 +47,9 @@ if not tags:
 # ---------------------------------------------------------------------------
 # 1. 仪表盘
 # ---------------------------------------------------------------------------
-week_rank = db.get_ranking(cid, "week")
+week_rank = cdata.get_ranking(cid, "week")
 week_star = week_rank[0] if week_rank and int(week_rank[0]["period_score"]) > 0 else None
-group_rows = db.get_group_ranking(cid, "all")
+group_rows = cdata.get_group_ranking(cid, "all")
 group_brief = " · ".join(
     f"{g['group_name']} {ui.fmt_score(int(g['sum_score']), False)}"
     for g in sorted(group_rows, key=lambda x: -x["sum_score"])[:3]
@@ -59,13 +57,13 @@ group_brief = " · ".join(
 
 st.markdown(
     ui.dashboard([
-        {"label": "今日评价", "value": f"{overview['today_logs']} 条", "icon": "📝"},
         {"label": "在班学生", "value": f"{overview['student_count']} 人", "icon": "👥"},
         {"label": "本周之星", "value": week_star["name"] if week_star else "暂无",
          "hint": (f"{ui.fmt_score(int(week_star['period_score']), False)} 分"
                   if week_star else "本周还没有加分"),
-         "icon": "⭐"},
-        {"label": "小组积分 Top3", "value": group_brief, "icon": "👨‍👩‍👧", "tone": "primary"},
+         "icon": "⭐", "tone": "primary", "shine": True},
+        {"label": "小组积分 Top3", "value": group_brief, "icon": "👨‍👩‍👧",
+         "tone": "primary", "big": True},
     ]),
     unsafe_allow_html=True,
 )
@@ -123,30 +121,15 @@ for idx, tpl in enumerate(templates):
             st.session_state["score_remark"] = tpl
             st.rerun()
 
-r1, r2 = st.columns([3, 2])
-with r1:
-    st.text_input("评语", key="score_remark", max_chars=200,
-                  placeholder="点上面的模板快速填入，也可以自己写")
-with r2:
-    st.file_uploader(f"图片凭证（≤{MAX_UPLOAD_MB}MB）",
-                     type=["png", "jpg", "jpeg", "webp"], key="score_img")
+st.text_input("评语", key="score_remark", max_chars=200,
+              placeholder="点上面的模板快速填入，也可以自己写")
 
 
 def _do_score(student_ids: list[str], target_type: str = "student",
               group_id: str | None = None) -> None:
-    image_url = ""
-    f = st.session_state.get("score_img")
-    if f is not None:
-        if f.size > MAX_UPLOAD_MB * 1024 * 1024:
-            st.error(f"图片超过 {MAX_UPLOAD_MB}MB，本次不含图片")
-        else:
-            try:
-                image_url = upload_image(f.getvalue(), f.name, prefix="score", cfg=get_settings())
-            except Exception as e:
-                st.error(f"图片上传失败（本次打分不含图片）：{e}")
     ok, msg, _ = db.add_scores(
         cid, student_ids, st.session_state["sel_tag"],
-        st.session_state.get("score_remark", ""), image_url, teacher,
+        st.session_state.get("score_remark", ""), "", teacher,
         target_type=target_type, group_id=group_id,
     )
     if ok:
@@ -204,7 +187,7 @@ else:
     if not groups:
         st.info("还没有小组，可到「班级管理 → 小组管理」创建")
     else:
-        rank_map = {g["group_name"]: g for g in db.get_group_ranking(cid)}
+        rank_map = {g["group_name"]: g for g in cdata.get_group_ranking(cid)}
         gcols = st.columns(min(3, len(groups)))
         for i, g in enumerate(groups):
             members = [s for s in students if s["group_name"] == g["name"]]
@@ -230,7 +213,7 @@ else:
 st.markdown('<div class="ce-title" style="margin-top:22px">最近评价</div>',
             unsafe_allow_html=True)
 
-recent = db.query_logs(cid, limit=60)
+recent = cdata.query_logs(cid, limit=60)
 grouped: dict[str, list[dict]] = {}
 order: list[str] = []
 for r in recent:
@@ -285,12 +268,6 @@ else:
                     + '</div></div>',
                     unsafe_allow_html=True,
                 )
-                if x.get("image_url"):
-                    from core.storage import image_bytes_io
-
-                    bio = image_bytes_io(x["image_url"])
-                    if bio:
-                        st.image(bio, width=220)
 
 quick_score_widget(cid, role, show=False)  # 本页即完整打分界面
 ui.play_sound_if()

@@ -38,21 +38,50 @@ def _guess_mime(filename: str) -> str:
 # Supabase 客户端（懒加载 + 进程内缓存）
 # ---------------------------------------------------------------------------
 _SB_CLIENT = None
+_SB_CLIENT_KEY = None
+
+
+def _clean_key(raw: str) -> str:
+    """清理密钥：去掉首尾空格、误加的引号、误加的 'Bearer ' 前缀"""
+    k = (raw or "").strip().strip('"').strip("'")
+    if k.lower().startswith("bearer "):
+        k = k[7:].strip()
+    return k
 
 
 def get_supabase(cfg: Config | None = None):
-    """获取 Supabase 客户端；cloud 模式必须配置 URL 与 service_role key"""
-    global _SB_CLIENT
-    if _SB_CLIENT is not None:
-        return _SB_CLIENT
+    """
+    获取 Supabase 客户端（延迟创建单例）。
+
+    403 Invalid Compact JWS 的常见原因就是这里的两个值不匹配：
+      · SUPABASE_URL 与 SUPABASE_SERVICE_KEY 来自**不同的项目**；
+      · 或者 SERVICE_KEY 贴的是 anon key / publishable key，而不是
+        Project Settings → API Keys 里的 service_role（JWT 形如 eyJhbGci...）。
+    """
+    global _SB_CLIENT, _SB_CLIENT_KEY
     cfg = cfg or get_settings()
-    if not cfg.supabase_url or not cfg.supabase_key:
+    url = (cfg.supabase_url or "").strip().rstrip("/")
+    key = _clean_key(cfg.supabase_key)
+    if not url or not key:
         raise RuntimeError(
             "云端模式缺少 SUPABASE_URL / SUPABASE_SERVICE_KEY，请检查 Streamlit Secrets。"
         )
+    # 配置变了就重建客户端
+    cache_key = (url, key)
+    if _SB_CLIENT is not None and _SB_CLIENT_KEY == cache_key:
+        return _SB_CLIENT
+    if not url.startswith("https://") or ".supabase.co" not in url:
+        raise RuntimeError(f"SUPABASE_URL 格式不对：{url}，应形如 https://xxxx.supabase.co")
+    if not key.startswith("eyJ"):
+        raise RuntimeError(
+            "SUPABASE_SERVICE_KEY 不是 JWT（应以 eyJ 开头）。"
+            "请到 Supabase → Project Settings → API Keys 复制 service_role 密钥，"
+            "不要用 anon / publishable key。"
+        )
     from supabase import create_client  # 延迟导入，本地模式无需安装
 
-    _SB_CLIENT = create_client(cfg.supabase_url, cfg.supabase_key)
+    _SB_CLIENT = create_client(url, key)
+    _SB_CLIENT_KEY = cache_key
     return _SB_CLIENT
 
 

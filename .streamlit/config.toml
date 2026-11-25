@@ -1,10 +1,10 @@
 # Streamlit 项目配置
 [theme]
 base = "light"
-primaryColor = "#FF7A8A"
-backgroundColor = "#FFFDFA"
-secondaryBackgroundColor = "#FFF6EC"
-textColor = "#3A3A46"
+primaryColor = "#3F6BD6"
+backgroundColor = "#F6F7FB"
+secondaryBackgroundColor = "#FFFFFF"
+textColor = "#1F2430"
 font = "sans serif"
 
 [server]
@@ -18,3 +18,7 @@ gatherUsageStats = false
 [client]
 showErrorDetails = true
 toolbarMode = "minimal"
+
+[runner]
+# 只重跑变化的片段，切换页面/交互更快
+fastReruns = true
