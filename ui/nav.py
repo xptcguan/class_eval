@@ -50,14 +50,16 @@ def go(page_key: str) -> None:
 
 
 # 菜单：(分组, key, 图标, 文字)
+# 菜单：(分组, key, Material 图标名, 文字)
+# 图标统一走 Material Symbols 线性图标，比 emoji 更干净统一
 MENU: list[tuple[str, str, str, str]] = [
-    ("评价操作", "scoring", "✏️", "快速评分"),
-    ("评价操作", "tv_board", "📺", "投屏榜单"),
-    ("数据查询", "ranking", "🏆", "积分榜单"),
-    ("数据查询", "logs", "📋", "评价记录"),
-    ("系统设置", "classes", "🏫", "班级管理"),
-    ("系统设置", "students_tags", "🏷️", "学生与标签"),
-    ("系统设置", "settings_export", "⚙️", "设置与导出"),
+    ("评价操作", "scoring", ":material/bolt:", "快速评分"),
+    ("评价操作", "tv_board", ":material/cast:", "投屏榜单"),
+    ("数据查询", "ranking", ":material/leaderboard:", "积分榜单"),
+    ("数据查询", "logs", ":material/receipt_long:", "评价记录"),
+    ("系统设置", "classes", ":material/school:", "班级管理"),
+    ("系统设置", "students_tags", ":material/sell:", "学生与标签"),
+    ("系统设置", "settings_export", ":material/tune:", "设置与导出"),
 ]
 HEAD_ONLY = {"students_tags"}
 
@@ -149,9 +151,9 @@ def teacher_shell(required: bool = True) -> tuple[dict[str, Any], dict[str, Any]
     teacher = auth.require_teacher()
     _sidebar_brand()
 
+    # 只展示姓名；"系统管理员"这类账号名不再显示在侧边栏
     st.sidebar.markdown(
-        f'<div class="sb-user"><b>{teacher.get("display_name", "")}</b>'
-        f'<span>{auth.role_label()}</span></div>',
+        f'<div class="sb-user"><b>{teacher.get("display_name", "")}</b></div>',
         unsafe_allow_html=True,
     )
 

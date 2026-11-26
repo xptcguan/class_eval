@@ -28,6 +28,70 @@ set_current_nav("scoring")
 teacher, cls, role = teacher_shell(required=True)
 cid = st.session_state[auth.K_CLASS]
 
+@st.dialog("快速评价")
+def _eval_dialog(student: dict, class_id: str, teacher: dict,
+                 all_tags: list[dict], default_tag: dict) -> None:
+    """轻量评价面板：选标签 → 选快捷评语 → 提交"""
+    st.markdown(
+        f'<div style="display:flex;align-items:center;gap:12px;margin-bottom:10px">'
+        f'{ui.avatar_img_tag(student, 46)}'
+        f'<div><div style="font-weight:700;font-size:16px">{ui.esc(student["name"])}</div>'
+        f'<div class="ce-sub">当前 {int(student.get("total_score") or 0)} 分</div></div></div>',
+        unsafe_allow_html=True,
+    )
+    plus = [t for t in all_tags if int(t["score"]) > 0]
+    minus = [t for t in all_tags if int(t["score"]) < 0]
+    labels = {t["id"]: f"{t['name']}  {int(t['score']):+d}" for t in all_tags}
+    ids = [t["id"] for t in all_tags]
+    default_idx = ids.index(default_tag["id"]) if default_tag["id"] in ids else 0
+
+    tab_a, tab_b = st.tabs(["表扬", "待改进"])
+    with tab_a:
+        for row_start in range(0, len(plus), 3):
+            cols = st.columns(3)
+            for col, t in zip(cols, plus[row_start:row_start + 3]):
+                with col:
+                    if st.button(f"{t['name']} {int(t['score']):+d}", key=f"ed_p_{t['id']}",
+                                 use_container_width=True):
+                        st.session_state["ed_tag"] = t["id"]
+    with tab_b:
+        for row_start in range(0, len(minus), 3):
+            cols = st.columns(3)
+            for col, t in zip(cols, minus[row_start:row_start + 3]):
+                with col:
+                    if st.button(f"{t['name']} {int(t['score']):+d}", key=f"ed_m_{t['id']}",
+                                 use_container_width=True):
+                        st.session_state["ed_tag"] = t["id"]
+
+    tag_id = st.selectbox("评价项", ids, index=ids.index(st.session_state["ed_tag"])
+                          if st.session_state.get("ed_tag") in ids else default_idx,
+                          format_func=lambda i: labels[i], key="ed_tag_select")
+    tpls = _remark_templates(tag_id)
+    if tpls:
+        tcols = st.columns(min(3, len(tpls)))
+        for idx, tpl in enumerate(tpls):
+            with tcols[idx % len(tcols)]:
+                if st.button(tpl, key=f"ed_tpl_{idx}", use_container_width=True):
+                    st.session_state["ed_remark"] = tpl
+                    st.rerun()
+    remark = st.text_input("评语（可选）", key="ed_remark", max_chars=150, value="")
+
+    c1, c2 = st.columns(2)
+    if c1.button("提交评价", type="primary", use_container_width=True, key="ed_submit"):
+        ok, msg, _ = db.add_scores(class_id, [student["id"]], tag_id, remark, "", teacher)
+        st.session_state.pop("eval_target", None)
+        if ok:
+            score = next(int(t["score"]) for t in all_tags if t["id"] == tag_id)
+            st.session_state["play_sound_now"] = "plus" if score > 0 else "minus"
+            ui.flash(msg, "success")
+            st.rerun()
+        else:
+            st.error(msg)
+    if c2.button("取消", use_container_width=True, key="ed_cancel"):
+        st.session_state.pop("eval_target", None)
+        st.rerun()
+
+
 page_header("快速评分", "", cls.get("name", ""))
 
 overview = cdata.class_overview(cid)
@@ -175,13 +239,26 @@ if mode == "单人打分":
             ) + "</div>",
             unsafe_allow_html=True,
         )
-        st.markdown(f'<div class="ce-sub">点名字即打分（{score_v:+d} 分）</div>',
-                    unsafe_allow_html=True)
-        btn_cols = st.columns(min(per_row, len(shown)))
+        st.caption(f"点击学生卡片即评价（当前选中 {cur_tag['name']} {score_v:+d} 分）；"
+                   f"也可勾选多人后批量提交")
+        # 卡片按钮：整卡热区，覆盖在卡片上方，点任意位置都能唤起评价
+        btn_cols = st.columns(per_row, gap="small")
         for i, s in enumerate(shown):
-            with btn_cols[i % len(btn_cols)]:
-                if st.button(s["name"], key=f"sc_{s['id']}", use_container_width=True):
-                    _do_score([s["id"]])
+            with btn_cols[i % per_row]:
+                if st.button(f"评价 {s['name']}", key=f"sc_{s['id']}",
+                             use_container_width=True):
+                    st.session_state["eval_target"] = s["id"]
+                    st.rerun()
+
+        # 批量勾选
+        pick_ids = st.multiselect(
+            "批量选择学生", [s["id"] for s in shown],
+            format_func=lambda i: next(f"{x['student_no']} {x['name']}"
+                                       for x in shown if x["id"] == i),
+            key="batch_pick", placeholder="可多选，一次给同一评价项")
+        if pick_ids and st.button(f"批量提交：{cur_tag['name']} {score_v:+d} 分 × {len(pick_ids)} 人",
+                                  type="primary", key="batch_submit"):
+            _do_score(pick_ids)
 
 else:
     if not groups:
@@ -272,3 +349,16 @@ else:
 quick_score_widget(cid, role, show=False)  # 本页即完整打分界面
 ui.play_sound_if()
 ui.show_flash()
+
+
+# ---------------------------------------------------------------------------
+# 整卡点击 → 评价面板（弹窗）
+# ---------------------------------------------------------------------------
+_target = st.session_state.get("eval_target")
+if _target:
+    _stu = next((x for x in students if x["id"] == _target), None)
+    if _stu:
+        _eval_dialog(_stu, cid, teacher, tags, cur_tag)
+    else:
+        st.session_state.pop("eval_target", None)
+

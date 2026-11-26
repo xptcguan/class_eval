@@ -34,6 +34,83 @@ tab_class, tab_students, tab_groups, tab_teachers, tab_codes = st.tabs(
     ["我的班级", "学生名单", "小组管理", "科任老师", "家长查看码"]
 )
 
+
+
+def _excel_template() -> bytes:
+    """生成 4 列分组模板（学号按文本，保留前导零）"""
+    df = pd.DataFrame([
+        {"学号": "01", "姓名": "张三", "小组编号": "1", "小组名称": "第一组"},
+        {"学号": "02", "姓名": "李四", "小组编号": "1", "小组名称": "第一组"},
+        {"学号": "03", "姓名": "王五", "小组编号": "2", "小组名称": "第二组"},
+    ])
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as w:
+        df.to_excel(w, index=False, sheet_name="分组名单")
+        ws = w.sheets["分组名单"]
+        for row in ws.iter_rows(min_row=2, min_col=1, max_col=1):
+            for cell in row:
+                cell.number_format = "@"
+    return buf.getvalue()
+
+
+def _apply_excel_grouping(cid: str, rows: list[dict], mode: str, per: int,
+                          gcount: int, overwrite: bool) -> dict:
+    """
+    解析 Excel 行并写入分组。
+      按表分组：用「小组名称」或「小组编号」（编号优先）
+      自动分组：按学号顺序，每组 per 人或分成 gcount 组
+    """
+    students = cdata.list_students(cid, include_inactive=True)
+    by_no = {str(x["student_no"]).strip(): x["id"] for x in students}
+    by_name = {str(x["name"]).strip(): x["id"] for x in students}
+
+    def _get(r, *keys) -> str:
+        for k in keys:
+            for kk, vv in r.items():
+                if str(kk).strip() == k:
+                    return str(vv).strip()
+        return ""
+
+    matched: list[tuple[str, dict]] = []
+    detail: list[dict] = []
+    for i, r in enumerate(rows, start=1):
+        no = _get(r, "学号", "student_no")
+        nm = _get(r, "姓名", "name")
+        sid = by_no.get(no) if no else None
+        if not sid and nm:
+            sid = by_name.get(nm)
+        if not sid:
+            detail.append({"行号": i, "学号": no, "姓名": nm, "原因": "班内找不到该学生"})
+            continue
+        matched.append((sid, r))
+
+    assignments: dict[str, str] = {}
+    if mode.startswith("按表"):
+        for sid, r in matched:
+            gno = _get(r, "小组编号", "group_no")
+            gname = _get(r, "小组名称", "group_name")
+            g = f"第{gno}组" if gno else gname
+            if g:
+                assignments[sid] = g
+    else:
+        ordered = [sid for sid, _ in matched]
+        if gcount and gcount > 0:
+            import math as _m
+            per = max(1, _m.ceil(len(ordered) / gcount))
+        per = per or 6
+        for idx, sid in enumerate(ordered):
+            assignments[sid] = f"第{idx // per + 1}组"
+
+    if overwrite:
+        for x in students:
+            if x["id"] not in assignments:
+                assignments[x["id"]] = ""
+
+    n, created = db.apply_grouping(cid, assignments)
+    return {"ok": len([v for v in assignments.values() if v]),
+            "miss": len(detail), "new_groups": created, "detail": detail}
+
+
 # ===========================================================================
 # 1. 我的班级
 # ===========================================================================
@@ -154,9 +231,10 @@ with tab_students:
         groups = [g["name"] for g in db.list_groups_of_class(cid)]
 
         if is_head:
-            t_add, t_bulk, t_edit = st.tabs(["单个添加", "批量导入", "编辑 / 头像"])
+            t_add, t_bulk, t_excel, t_edit, t_danger = st.tabs(
+                ["单个添加", "批量导入", "Excel 分组", "编辑 / 头像", "危险操作"])
         else:
-            t_add, t_bulk, t_edit = None, None, None
+            t_add = t_bulk = t_excel = t_edit = t_danger = None
 
         if t_add is not None:
             with t_add:
@@ -183,6 +261,7 @@ with tab_students:
                 text = st.text_area("粘贴名单", height=170,
                                     placeholder="01,郭宸瑄,女,一\n02,石舒白,女,一\n03,梁子轩,男,一",
                                     key="bulk_text")
+                st.caption("查重规则：优先「班级 + 学号」，无学号时按「班级 + 姓名」；重复行自动跳过，不覆盖已有积分")
                 if st.button("导入名单", type="primary", disabled=not text.strip()):
                     rows = []
                     for line in text.splitlines():
@@ -196,11 +275,93 @@ with tab_students:
                             "gender": p[2] if len(p) > 2 else "",
                             "group_name": p[3] if len(p) > 3 else "",
                         })
-                    ok_n, errs = db.bulk_add_students(cid, rows)
-                    ui.flash(f"成功导入 {ok_n} 名学生", "success")
-                    if errs:
-                        st.warning("部分未导入：\n- " + "\n- ".join(errs[:10]))
+                    res = db.import_students_smart(cid, rows)
+                    st.session_state["import_result"] = res
+                    ui.flash(f"新增 {res['added']} 人，跳过重复 {res['duplicated']} 人",
+                             "success" if res["added"] else "info")
                     st.rerun()
+
+                res = st.session_state.get("import_result")
+                if res:
+                    st.markdown(
+                        ui.dashboard([
+                            {"label": "新增", "value": f"{res['added']} 人", "tone": "plus", "icon": "✅"},
+                            {"label": "重复跳过", "value": f"{res['duplicated']} 人", "tone": "minus", "icon": "⏭"},
+                            {"label": "缺字段", "value": f"{res['invalid']} 人", "icon": "⚠️"},
+                        ]),
+                        unsafe_allow_html=True,
+                    )
+                    bad = res.get("dup_rows", []) + res.get("invalid_rows", [])
+                    if bad:
+                        with st.expander(f"查看被跳过的 {len(bad)} 条明细"):
+                            st.dataframe(pd.DataFrame(bad), use_container_width=True,
+                                         hide_index=True)
+                            buf = io.BytesIO()
+                            pd.DataFrame(bad).to_csv(buf, index=False, encoding="utf-8-sig")
+                            st.download_button("下载跳过明细 CSV", buf.getvalue(),
+                                               "导入跳过明细.csv", "text/csv")
+                    if st.button("关闭结果", key="clear_import_res"):
+                        st.session_state.pop("import_result", None)
+                        st.rerun()
+
+            with t_excel:
+                st.caption("上传 Excel（4 列：学号、姓名、小组编号、小组名称），一次完成整班分组。"
+                           "学号按文本读取，避免 001 被识别成 1。")
+                _tpl = _excel_template()
+                st.download_button("下载导入模板", _tpl, "分组名单模板.xlsx",
+                                   "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                   icon=":material/download:")
+                up = st.file_uploader("选择 Excel 文件", type=["xlsx", "xls"], key="grp_xlsx")
+                if up is not None:
+                    try:
+                        _df = pd.read_excel(up, sheet_name=0, dtype=str).fillna("")
+                    except Exception as _e:
+                        st.error(f"读取失败：{_e}")
+                        _df = None
+                    if _df is not None and len(_df.columns) >= 2:
+                        _df.columns = [str(c).strip() for c in _df.columns]
+                        st.dataframe(_df.head(20), use_container_width=True, hide_index=True)
+                        _has_group_col = any(("小组编号" in c) or ("小组名称" in c) for c in _df.columns)
+                        _mode = st.radio("分组方式",
+                                         ["按表分组（表内有小组列）", "自动分组（小组列留空）"],
+                                         horizontal=True, index=0 if _has_group_col else 1,
+                                         key="grp_mode")
+                        _per = _gcount = 0
+                        if _mode.startswith("自动"):
+                            _a1, _a2 = st.columns(2)
+                            _per = _a1.number_input("每组人数", 1, 20, 6, key="grp_per")
+                            _gcount = _a2.number_input("或指定组数", 0, 20, 0, key="grp_cnt")
+                        _overwrite = st.radio("写入模式",
+                                              ["增量：只改表内学生", "覆盖：整班重新分组"],
+                                              horizontal=True, key="grp_write")
+                        if st.button("执行分组", type="primary", key="grp_apply"):
+                            _rows = _df.to_dict("records")
+                            _m = _apply_excel_grouping(cid, _rows, _mode, _per, _gcount,
+                                                       _overwrite.startswith("覆盖"))
+                            st.session_state["grp_result"] = _m
+                            ui.flash(f"成功入组 {_m['ok']} 人，未匹配 {_m['miss']} 人",
+                                     "success" if _m["ok"] else "info")
+                            st.rerun()
+                    elif _df is not None:
+                        st.warning("表格至少需要「学号」「姓名」两列")
+
+                _m = st.session_state.get("grp_result")
+                if _m:
+                    st.markdown(
+                        ui.dashboard([
+                            {"label": "成功入组", "value": f"{_m['ok']} 人", "tone": "plus", "icon": "✅"},
+                            {"label": "未匹配", "value": f"{_m['miss']} 人", "tone": "minus", "icon": "❓"},
+                            {"label": "新建小组", "value": f"{_m['new_groups']} 个", "icon": "🧩"},
+                        ]),
+                        unsafe_allow_html=True,
+                    )
+                    if _m.get("detail"):
+                        with st.expander(f"未匹配明细 {len(_m['detail'])} 条"):
+                            st.dataframe(pd.DataFrame(_m["detail"]),
+                                         use_container_width=True, hide_index=True)
+                    if st.button("关闭结果", key="clear_grp_res"):
+                        st.session_state.pop("grp_result", None)
+                        st.rerun()
 
             with t_edit:
                 if not students:
@@ -484,4 +645,38 @@ with tab_codes:
                 ui.flash(f"{nm} 的新查看码：{new_code}", "success")
                 st.rerun()
 
+# ===========================================================================
+# 危险操作：一键清除班内所有学生
+# ===========================================================================
+with t_danger:
+    st.caption("清除后学生从名单与榜单中移除，积分记录标记为已撤回，可在「评价记录 → 仅已撤回」查阅。")
+    _n = len([x for x in db.list_students(cid) if x["is_active"]]) if cid else 0
+    st.markdown(f'<div class="ce-card">当前在班学生：<b>{_n}</b> 人</div>',
+                unsafe_allow_html=True)
+    if st.button("清除本班所有学生", icon=":material/delete_forever:",
+                 type="secondary", key="open_clear_students"):
+        st.session_state["confirm_clear_students"] = True
+    if st.session_state.get("confirm_clear_students"):
+        _confirm_clear_students(cls, teacher)
+
 ui.show_flash()
+
+
+@st.dialog("确认清除本班所有学生？")
+def _confirm_clear_students(cls: dict, teacher: dict) -> None:
+    st.warning(
+        f"将把「{(cls or {}).get('name', '')}」全部学生移出班级，并把他们的积分记录标记为已撤回。\n\n"
+        "学生与评分记录不会物理删除，历史可在「评价记录 → 仅已撤回」中查看。"
+    )
+    _c1, _c2 = st.columns(2)
+    if _c1.button("确认清除", type="primary", use_container_width=True):
+        _ok, _msg = db.clear_class_students(cid, teacher)
+        st.session_state["confirm_clear_students"] = False
+        if _ok:
+            ui.flash(_msg, "success")
+            st.rerun()
+        else:
+            st.error(_msg)
+    if _c2.button("取消", use_container_width=True):
+        st.session_state["confirm_clear_students"] = False
+        st.rerun()

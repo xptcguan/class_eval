@@ -124,6 +124,33 @@ section[data-testid="stSidebar"]{ background:#fff; border-right:1px solid var(--
 .sb-divider{ border-top:1px solid var(--line); margin:10px 4px; }
 .sb-hint{ font-size:12.5px; color:var(--muted); padding:6px 12px; line-height:1.6; }
 
+
+/* ===== 侧边栏：班级优化大师风格 ===== */
+section[data-testid="stSidebar"] .stButton>button{
+  gap:10px; border-radius:10px !important; font-size:14.5px; letter-spacing:.2px;
+}
+section[data-testid="stSidebar"] .stButton>button [data-testid="stIconMaterial"]{
+  font-size:20px; opacity:.9;
+}
+section[data-testid="stSidebar"] .stButton>button[kind="primary"] [data-testid="stIconMaterial"]{
+  opacity:1;
+}
+/* 分组标题：更淡更小，像分寸感的分隔 */
+.sb-group{
+  font-size:11px; color:#A7AEBB; font-weight:600; letter-spacing:1.2px;
+  padding:14px 12px 5px; border-top:1px solid #F0F2F6; margin-top:4px;
+}
+.sb-group:first-of-type{ border-top:none; margin-top:0; }
+/* 用户区：只留姓名，右对齐小字 */
+.sb-user{
+  display:flex; align-items:center; padding:9px 12px; background:#F6F7FB;
+  border-radius:10px; margin-bottom:10px; font-size:14px; font-weight:600;
+}
+.sb-brand{
+  font-size:18px; font-weight:800; letter-spacing:.5px;
+  padding:2px 8px 16px;
+}
+
 /* 侧边栏收起态：只留图标 */
 section[data-testid="stSidebar"][aria-expanded="false"]{ min-width:3.6rem !important; width:3.6rem !important; }
 section[data-testid="stSidebar"][aria-expanded="false"] .sb-brand-text,

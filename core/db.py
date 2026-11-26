@@ -717,6 +717,93 @@ def bulk_add_students(class_id: str, rows: list[dict[str, str]],
     return ok, errs
 
 
+def import_students_smart(class_id: str, rows: list[dict[str, str]],
+                          cfg: Config | None = None) -> dict[str, Any]:
+    """
+    带查重的批量导入（对标签需求 3.1.2）。
+
+    查重键：优先「班级 + 学号」，学号为空时降级为「班级 + 姓名」。
+    重复行默认**跳过**，不覆盖已有学生的积分与评价记录。
+
+    返回：
+      {added: 新增数, duplicated: 重复数, invalid: 缺字段数,
+       dup_rows: [{行号, 学号, 姓名, 原因}], invalid_rows: [...]}
+    """
+    cfg = cfg or get_settings()
+    existing = all_rows(
+        "SELECT student_no, name FROM students WHERE class_id = ?", [class_id], cfg=cfg)
+    seen_no = {str(x["student_no"]).strip() for x in existing}
+    seen_name = {str(x["name"]).strip() for x in existing}
+
+    added = duplicated = invalid = 0
+    dup_rows: list[dict[str, Any]] = []
+    invalid_rows: list[dict[str, Any]] = []
+
+    for i, r in enumerate(rows, start=1):
+        no = str(r.get("student_no", "")).strip()
+        nm = str(r.get("name", "")).strip()
+        if not nm:
+            invalid += 1
+            invalid_rows.append({"行号": i, "学号": no, "姓名": nm, "原因": "姓名为空"})
+            continue
+        if no and no in seen_no:
+            duplicated += 1
+            dup_rows.append({"行号": i, "学号": no, "姓名": nm, "原因": "学号重复"})
+            continue
+        if not no and nm in seen_name:
+            duplicated += 1
+            dup_rows.append({"行号": i, "学号": "", "姓名": nm, "原因": "姓名重复（无学号）"})
+            continue
+        success, msg = add_student(
+            class_id, no or f"T{i:02d}", nm,
+            gender=str(r.get("gender", "")).strip(),
+            group_name=str(r.get("group_name", "")).strip(),
+            avatar_key=str(r.get("avatar_key", "")).strip() or f"a{(i % 32) + 1:02d}",
+            cfg=cfg,
+        )
+        if success:
+            added += 1
+            seen_no.add(no)
+            seen_name.add(nm)
+        else:
+            duplicated += 1
+            dup_rows.append({"行号": i, "学号": no, "姓名": nm, "原因": msg})
+
+    _invalidate_cache()
+    return {"added": added, "duplicated": duplicated, "invalid": invalid,
+            "dup_rows": dup_rows, "invalid_rows": invalid_rows}
+
+
+def clear_class_students(class_id: str, teacher: dict[str, Any],
+                         cfg: Config | None = None) -> tuple[bool, str]:
+    """
+    一键清除班内所有学生（软删除：is_active=0），同时清空其积分。
+    历史评价记录保留（避免误删不可恢复），但学生不再出现在名单/榜单中。
+    """
+    cfg = cfg or get_settings()
+    if not is_head_teacher(teacher["id"], class_id, cfg):
+        return False, "只有班主任可以清除学生"
+    n = one("SELECT COUNT(*) AS n FROM students WHERE class_id = ? AND is_active = 1",
+            [class_id], cfg=cfg)
+    total = int((n or {}).get("n") or 0)
+    if total == 0:
+        return False, "本班当前没有学生"
+    now = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with get_conn(cfg) as cur:
+        cur.execute("UPDATE students SET is_active = ?, total_score = 0 WHERE class_id = ?",
+                    [False, class_id])
+        cur.execute(
+            "UPDATE score_logs SET status = 'revoked', revoked_by = ?, revoked_by_name = ?,"
+            " revoked_at = ?, revoke_reason = ? WHERE class_id = ? AND status = 'normal'",
+            [teacher["id"], teacher.get("display_name", ""), now,
+             "清除班内学生", class_id],
+        )
+    write_audit(class_id, teacher, "clear_students",
+                f"一键清除本班 {total} 名学生（积分记录已撤回，历史可查）", cfg=cfg)
+    _invalidate_cache()
+    return True, f"已清除 {total} 名学生，评价记录可历史查看"
+
+
 def list_students(class_id: str, include_inactive: bool = False,
                   group_name: str | None = None, cfg: Config | None = None) -> list[dict[str, Any]]:
     sql = "SELECT * FROM students WHERE class_id = ?"
@@ -946,6 +1033,29 @@ def revoke_log(log_id: str, teacher: dict[str, Any], reason: str = "",
                 f"{int(log['score']):+d} 分；原因：{reason or '未填写'}", cfg=cfg)
     _invalidate_cache()
     return True, "已撤回，操作已记入审计日志"
+
+
+def apply_grouping(class_id: str, assignments: dict[str, str],
+                   create_missing: bool = True,
+                   cfg: Config | None = None) -> tuple[int, int]:
+    """
+    批量把学生归组。assignments: {student_id: 组名}
+    create_missing=True 时自动创建不存在的小组。返回 (更新人数, 新建小组数)
+    """
+    cfg = cfg or get_settings()
+    have = {g["name"] for g in list_groups_of_class(class_id, cfg=cfg)}
+    created = 0
+    for sid, gname in assignments.items():
+        gname = (gname or "").strip()
+        if gname and gname not in have and create_missing:
+            ok, _ = save_group(class_id, gname, cfg=cfg)
+            if ok:
+                have.add(gname)
+                created += 1
+        ex("UPDATE students SET group_name = ? WHERE id = ? AND class_id = ?",
+           [gname, sid, class_id], cfg=cfg)
+    _invalidate_cache()
+    return len(assignments), created
 
 
 def clear_class_scores(class_id: str, teacher: dict[str, Any],
